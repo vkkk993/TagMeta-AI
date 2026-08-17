@@ -30,7 +30,7 @@ nlp = spacy.load("en_core_web_sm")
 
 # --- MONGODB CONNECTION ---
 mongo_uri = os.getenv("MONGO_URI")
-mongo_client = MongoClient("mongodb://localhost:27017/")
+mongo_client = MongoClient(mongo_uri)
 db = mongo_client["tagmeta_db"]
 collection = db["transcripts"]
 print("Connected to MongoDB successfully!")
