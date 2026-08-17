@@ -12,6 +12,11 @@ from pypdf import PdfReader
 import webvtt
 from bson import ObjectId
 from bson.errors import InvalidId
+from collections import Counter 
+import spacy # <-- NEW: For Advanced NER
+from textblob import TextBlob
+from pymongo import MongoClient
+# <-- NEW: For Sentiment Analysis
 
 app = Flask(__name__)
 CORS(app)
@@ -19,7 +24,12 @@ CORS(app)
 load_dotenv()
 client = genai.Client()
 
+# Load the local NLP model into memory when the server starts
+print("Loading local NLP model (spaCy)...")
+nlp = spacy.load("en_core_web_sm")
+
 # --- MONGODB CONNECTION ---
+mongo_uri = os.getenv("MONGO_URI")
 mongo_client = MongoClient("mongodb://localhost:27017/")
 db = mongo_client["tagmeta_db"]
 collection = db["transcripts"]
@@ -52,6 +62,71 @@ def parse_file(filepath, filename):
             text_content += f"[{caption.start} -> {caption.end}] {caption.text}\n"
             segments.append({"start": caption.start, "end": caption.end, "text": caption.text})
     return text_content, segments
+
+# --- NEW: ADVANCED LOCAL NLP FALLBACK LOGIC ---
+def fallback_local_nlp(text_content, filename):
+    print("[WARNING] Executing Advanced Local NLP Fallback...")
+    
+    clean_name = filename.rsplit('.', 1)[0]
+    
+    # 1. Process text with TextBlob for Sentiment
+    blob = TextBlob(text_content)
+    polarity = blob.sentiment.polarity
+    if polarity > 0.1:
+        sentiment_label = "Positive"
+    elif polarity < -0.1:
+        sentiment_label = "Negative"
+    else:
+        sentiment_label = "Neutral"
+        
+    # 2. Process text with spaCy for Named Entity Recognition (NER)
+    # We only process the first 100,000 characters to keep it fast locally
+    doc = nlp(text_content[:100000])
+    
+    people = []
+    locations = []
+    orgs = []
+    
+    for ent in doc.ents:
+        if ent.label_ == "PERSON" and ent.text not in people:
+            people.append(ent.text)
+        elif ent.label_ in ["GPE", "LOC"] and ent.text not in locations:
+            locations.append(ent.text)
+        elif ent.label_ == "ORG" and ent.text not in orgs:
+            orgs.append(ent.text)
+            
+    # Format entities for your frontend
+    formatted_people = [{"name": p.strip(), "relevance": 80} for p in people[:10]]
+    formatted_locs = [{"name": l.strip(), "relevance": 80} for l in locations[:5]]
+    formatted_orgs = [{"name": o.strip(), "relevance": 80} for o in orgs[:5]]
+    
+    # 3. Get basic keywords
+    words = [token.text.lower() for token in doc if token.is_alpha and not token.is_stop and len(token.text) > 4]
+    common_words = [word for word, count in Counter(words).most_common(5)]
+
+    return {
+        "title": clean_name,
+        "file_name": filename,
+        "words": len(text_content.split()),
+        "ai_summary": f"Local NLP Extraction: The text has a generally {sentiment_label.lower()} tone. Extracted {len(formatted_people)} key characters locally.",
+        "genre": "Analyzed Locally",
+        "subgenres": [],
+        "sentiment": sentiment_label,
+        "emotion": "Unknown (Requires LLM)",
+        "deep_analysis": {
+            "narrative_arc": "Narrative structure cannot be generated without an LLM.",
+            "thematic_execution": "Thematic execution cannot be generated without an LLM."
+        },
+        "topics": [{"theme": w.capitalize(), "score": 60} for w in common_words],
+        "keywords": [{"word": w, "count": "N/A"} for w in common_words],
+        "named_entities": formatted_people,
+        "locations": formatted_locs,
+        "organizations": formatted_orgs,
+        "works_songs": [],
+        "other_entities": [],
+        "speaker_metrics": [],
+        "memorable_quotes": []
+    }
 
 # ==========================================
 # --- 1. DYNAMIC DASHBOARD API ---
@@ -295,7 +370,6 @@ def get_script_insights(script_id):
             "worksSongs": doc.get('works_songs', []),
             "otherEntities": doc.get('other_entities', []),
             "speakerMetrics": doc.get('speaker_metrics', []),
-            # WIRED: Memorable Quotes safely pulled from DB
             "memorableQuotes": doc.get('memorable_quotes', doc.get('memorableQuotes', []))
         }), 200
     except Exception as e:
@@ -388,7 +462,6 @@ def upload_file():
         
         clean_name = file.filename.rsplit('.', 1)[0]
         
-        # Safely extract all keys regardless of camelCase or snake_case AI generation
         clean_metadata = {
             "title": clean_name,
             "file_name": file.filename,
@@ -424,14 +497,11 @@ def upload_file():
             ]
         }))
         
-        # WIRED: If an old document exists, entirely DELETE it so the new insert gets a fresh Timestamp ID
-        # This guarantees it pops to the top of the "Recent Dashboard" view!
         if existing_docs:
             for doc in existing_docs:
                 collection.delete_one({"_id": doc["_id"]})
                 print(f"DELETED OLD DB RECORD: {doc.get('title')}")
                 
-        # Insert fresh to generate a brand new Timestamped ObjectId
         insert_result = collection.insert_one(clean_metadata)
         clean_metadata['_id'] = str(insert_result.inserted_id)
 
@@ -443,10 +513,45 @@ def upload_file():
 
     except Exception as e:
         error_str = str(e)
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            clean_msg = "AI Speed Limit Reached: Please wait 60 seconds before analyzing another script."
-            return jsonify({"error": clean_msg}), 429
-        return jsonify({"error": "An unexpected error occurred during AI analysis. Please try again."}), 500
+        print(f"[ERROR] Gemini API or parsing failed: {error_str}")
+        
+        try:
+            # 1. Trigger the fallback function we added above
+            clean_metadata = fallback_local_nlp(text_content, file.filename)
+            
+            # 2. Preserve VTT timeline if the file was a .vtt
+            clean_metadata["timeline"] = segments 
+            
+            # 3. Perform the exact same MongoDB replace/insert logic as the success block
+            clean_name = file.filename.rsplit('.', 1)[0]
+            escaped_name = re.escape(clean_name)
+            fuzzy_name = escaped_name.replace('\\ ', '[ _-]').replace('\\_', '[ _-]').replace('\\-', '[ _-]')
+            
+            existing_docs = list(collection.find({
+                "$or": [
+                    {"file_name": {"$regex": f"^{fuzzy_name}", "$options": "i"}},
+                    {"title": {"$regex": f"^{fuzzy_name}", "$options": "i"}}
+                ]
+            }))
+            
+            if existing_docs:
+                for doc in existing_docs:
+                    collection.delete_one({"_id": doc["_id"]})
+                    print(f"DELETED OLD DB RECORD: {doc.get('title')}")
+                    
+            insert_result = collection.insert_one(clean_metadata)
+            clean_metadata['_id'] = str(insert_result.inserted_id)
+
+            # 4. Return success (200 OK) but with a "Warning" status to notify the frontend
+            return jsonify({
+                "message": "API limit reached. Processed using Local Fallback Mode!",
+                "status": "Warning",
+                "metadata": clean_metadata
+            }), 200
+            
+        except Exception as fallback_error:
+            # If even the local fallback fails, return a 500 server error
+            return jsonify({"error": f"API and Local Fallback both failed: {str(fallback_error)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
