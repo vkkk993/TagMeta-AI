@@ -7,3 +7,5 @@ pypdf
 webvtt-py
 pymongo
 gunicorn
+spacy
+en-core-web-sm
