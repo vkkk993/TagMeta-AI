@@ -16,6 +16,9 @@ from collections import Counter
 import spacy # <-- NEW: For Advanced NER
 from textblob import TextBlob
 from pymongo import MongoClient
+import os
+import pymongo
+from google import genai
 # <-- NEW: For Sentiment Analysis
 
 app = Flask(__name__)
