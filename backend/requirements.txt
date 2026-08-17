@@ -1,0 +1,7 @@
+flask
+flask-cors
+pandas
+python-dotenv
+google-genai
+pypdf
+webvtt-py
