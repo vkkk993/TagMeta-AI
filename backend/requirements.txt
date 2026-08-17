@@ -5,4 +5,5 @@ python-dotenv
 google-genai
 pypdf
 webvtt-py
+pymongo
 gunicorn
