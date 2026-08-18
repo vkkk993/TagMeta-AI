@@ -28,7 +28,7 @@ load_dotenv()
 client = genai.Client()
 
 # Load the local NLP model into memory when the server starts
-print("Loading local NLP model (spaCy)...")
+print("spaCy model will be loaded when needed...")
 nlp = spacy.load("en_core_web_sm")
 
 # --- MONGODB CONNECTION ---
