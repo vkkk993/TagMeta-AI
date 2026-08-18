@@ -556,5 +556,5 @@ def upload_file():
             # If even the local fallback fails, return a 500 server error
             return jsonify({"error": f"API and Local Fallback both failed: {str(fallback_error)}"}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
